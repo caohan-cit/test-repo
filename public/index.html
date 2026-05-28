@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>掃碼識別</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a1a;
+      min-height: 100vh;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    /* Full-screen camera preview */
+    #video {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 0;
+    }
+
+    /* Overlay sits above the video */
+    .overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Transparent scan frame — box-shadow creates the surrounding dark mask */
+    .scan-frame {
+      position: relative;
+      width: 85%;
+      max-width: 400px;
+      aspect-ratio: 3 / 2;
+      box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+      border-radius: 4px;
+    }
+
+    /* Orange L-shaped corner brackets */
+    .corner {
+      position: absolute;
+      width: 26px;
+      height: 26px;
+      border-color: #ff6b35;
+      border-style: solid;
+    }
+    .corner-tl { top: -2px;    left: -2px;  border-width: 3px 0 0 3px; }
+    .corner-tr { top: -2px;    right: -2px; border-width: 3px 3px 0 0; }
+    .corner-bl { bottom: -2px; left: -2px;  border-width: 0 0 3px 3px; }
+    .corner-br { bottom: -2px; right: -2px; border-width: 0 3px 3px 0; }
+
+    /* Button + result area below the frame */
+    .bottom {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 85%;
+      max-width: 400px;
+      margin-top: 36px;
+    }
+
+    .scan-btn {
+      width: 100%;
+      padding: 16px;
+      background: #ff6b35;
+      color: #fff;
+      font-size: 1.1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 50px;
+      cursor: pointer;
+      letter-spacing: 4px;
+    }
+    .scan-btn:active   { background: #e55a25; }
+    .scan-btn:disabled { background: #888; cursor: default; }
+
+    #result {
+      margin-top: 20px;
+      color: #fff;
+      font-size: 0.95rem;
+      text-align: center;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-all;
+      min-height: 1.4em;
+    }
+    #result.loading { color: #bbb; }
+    #result.error   { color: #ff6b6b; }
+    #result.empty   { color: #888; }
+
+    /* Shown when getUserMedia fails */
+    #error-screen {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #1a1a1a;
+      color: #fff;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 40px;
+      gap: 16px;
+      z-index: 10;
+    }
+    #error-screen.show { display: flex; }
+    #error-screen p.sub { color: #888; font-size: 0.85rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+
+  <video id="video" autoplay playsinline muted></video>
+
+  <div class="overlay">
+    <div class="scan-frame" id="scanFrame">
+      <div class="corner corner-tl"></div>
+      <div class="corner corner-tr"></div>
+      <div class="corner corner-bl"></div>
+      <div class="corner corner-br"></div>
+    </div>
+    <div class="bottom">
+      <button class="scan-btn" id="scanBtn">掃碼</button>
+      <div id="result" class="empty"></div>
+    </div>
+  </div>
+
+  <div id="error-screen">
+    <p>無法開啟相機</p>
+    <p class="sub">請確認已授權相機存取，<br>並使用 HTTPS 或 localhost 開啟本頁面。</p>
+  </div>
+
+  <script>
+    const video       = document.getElementById('video');
+    const scanBtn     = document.getElementById('scanBtn');
+    const resultEl    = document.getElementById('result');
+    const scanFrame   = document.getElementById('scanFrame');
+    const errorScreen = document.getElementById('error-screen');
+
+    // Auto-open rear camera on page load
+    (async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+        });
+        video.srcObject = stream;
+      } catch (err) {
+        errorScreen.classList.add('show');
+      }
+    })();
+
+    scanBtn.addEventListener('click', async () => {
+      scanBtn.disabled = true;
+      resultEl.className = 'loading';
+      resultEl.textContent = '識別中...';
+
+      try {
+        const blob = captureFrameCropped();
+        const formData = new FormData();
+        formData.append('image', blob, 'scan.jpg');
+
+        const res  = await fetch('/scan', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (!res.ok) {
+          resultEl.className = 'error';
+          resultEl.textContent = '錯誤：' + (data.error || res.status);
+          return;
+        }
+
+        if (data.count === 0) {
+          resultEl.className = 'empty';
+          resultEl.textContent = '未識別到條碼';
+          return;
+        }
+
+        resultEl.className = '';
+        resultEl.textContent = data.results.map(r => r.format + '：' + r.text).join('\n');
+
+      } catch (err) {
+        resultEl.className = 'error';
+        resultEl.textContent = '網路錯誤：' + err.message;
+      } finally {
+        scanBtn.disabled = false;
+      }
+    });
+
+    /**
+     * Capture the current video frame cropped to the scan frame rectangle.
+     *
+     * The <video> uses object-fit:cover, so the video content is scaled to fill
+     * the element and the excess is clipped. We must account for that offset when
+     * mapping element-relative CSS coordinates to intrinsic video pixel coordinates.
+     *
+     * If video aspect > element aspect (landscape video on portrait screen):
+     *   - scale is driven by height  → video overflows horizontally
+     *   - offsetX = (videoWidth - elementWidth * scale) / 2
+     * Otherwise:
+     *   - scale is driven by width   → video overflows vertically
+     *   - offsetY = (videoHeight - elementHeight * scale) / 2
+     */
+    function captureFrameCropped() {
+      const frameRect = scanFrame.getBoundingClientRect();
+      const videoRect = video.getBoundingClientRect();
+
+      const videoAspect   = video.videoWidth  / video.videoHeight;
+      const elementAspect = videoRect.width   / videoRect.height;
+
+      let scale, offsetX, offsetY;
+      if (videoAspect > elementAspect) {
+        // landscape video on portrait element — cover clips the sides
+        scale   = video.videoHeight / videoRect.height;
+        offsetX = (video.videoWidth - videoRect.width * scale) / 2;
+        offsetY = 0;
+      } else {
+        // portrait (or square) video — cover clips top/bottom
+        scale   = video.videoWidth / videoRect.width;
+        offsetX = 0;
+        offsetY = (video.videoHeight - videoRect.height * scale) / 2;
+      }
+
+      const x = Math.max(0, offsetX + (frameRect.left - videoRect.left) * scale);
+      const y = Math.max(0, offsetY + (frameRect.top  - videoRect.top)  * scale);
+      const w = Math.min(frameRect.width  * scale, video.videoWidth  - x);
+      const h = Math.min(frameRect.height * scale, video.videoHeight - y);
+
+      // Crop canvas at native resolution first
+      const crop = document.createElement('canvas');
+      crop.width  = Math.round(w);
+      crop.height = Math.round(h);
+      crop.getContext('2d').drawImage(video, x, y, w, h, 0, 0, crop.width, crop.height);
+
+      // Compress: scale down so longest side is at most 800px
+      const MAX_SIDE = 800;
+      const ratio = Math.min(1, MAX_SIDE / Math.max(crop.width, crop.height));
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(crop.width  * ratio);
+      canvas.height = Math.round(crop.height * ratio);
+      canvas.getContext('2d').drawImage(crop, 0, 0, canvas.width, canvas.height);
+
+      return dataURLtoBlob(canvas.toDataURL('image/jpeg', 0.85));
+    }
+
+    function dataURLtoBlob(dataUrl) {
+      const [header, data] = dataUrl.split(',');
+      const mime   = header.match(/:(.*?);/)[1];
+      const binary = atob(data);
+      const arr    = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) arr[i] = binary.charCodeAt(i);
+      return new Blob([arr], { type: mime });
+    }
+  </script>
+</body>
+</html>
